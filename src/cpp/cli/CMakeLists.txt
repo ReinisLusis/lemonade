@@ -32,6 +32,19 @@ set(COMMON_SOURCES
     ../server/utils/url_utils.cpp
     ../server/utils/json_utils.cpp
     ../server/utils/http_client.cpp
+    # http_client.cpp records progress into the durable job store, so the CLI
+    # needs the same job sources lemonade-server-core has. Without them the CLI
+    # does not link at all — Tracker::mark_failed and download::offload come out
+    # as unresolved externals — and nothing noticed, because the CLI is not
+    # built by the default target and CI never asked for it.
+    #
+    # It is the same integration either way: a download started by `lemonade
+    # pull` and one started in the UI must land in one store, or the two halves
+    # of this program disagree about what is downloading.
+    ../job/record.cpp
+    ../job/store.cpp
+    ../job/discovery.cpp
+    ../server/utils/download_job.cpp
     # recipe_import.cpp persists and validates remote registry provenance.
     # Compile the provider implementation into the standalone CLI as well; the
     # CLI does not link lemonade-server-core, where this source is otherwise built.

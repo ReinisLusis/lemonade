@@ -651,6 +651,20 @@ namespace lemon::backends {
                 archive_download_opts.expected_hash = lookup_expected_asset_hash(
                     spec.recipe, backend, expected_version, repo, filename);
                 archive_download_opts.resume_partial = false;
+                // Without a group id the job is recorded but excluded from
+                // /downloads, so a backend interrupted partway came back
+                // invisible while its bytes sat on disk.
+                //
+                // The id has to be the one the live path already uses, or a
+                // resumed row would not match the download the UI thinks it is
+                // resuming. A backend alone is not unique -- "npu" belongs to
+                // both flm and ryzenai-llm -- so the recipe is part of it.
+                const std::string job_name = spec.recipe + ":" + backend;
+                archive_download_opts.job_group_id = "backend:" + job_name;
+                archive_download_opts.job_display_name = job_name;
+                archive_download_opts.job_file = filename;
+                archive_download_opts.job_file_index = 0;
+                archive_download_opts.job_total_files = 1;
 
                 auto download_result = utils::HttpClient::download_file(
                     url, zip_path, http_progress_cb, {}, archive_download_opts);
@@ -708,6 +722,14 @@ namespace lemon::backends {
                     part_download_opts.expected_hash = lookup_expected_asset_hash(
                         spec.recipe, backend, expected_version, repo, part_filename);
                     part_download_opts.resume_partial = false;
+                    // Every part shares one group, so the row builder folds them
+                    // into a single backend row rather than one row per part.
+                    const std::string part_job_name = spec.recipe + ":" + backend;
+                    part_download_opts.job_group_id = "backend:" + part_job_name;
+                    part_download_opts.job_display_name = part_job_name;
+                    part_download_opts.job_file = part_filename;
+                    part_download_opts.job_file_index = part_index - 1;
+                    part_download_opts.job_total_files = total_parts;
 
                     auto part_result = utils::HttpClient::download_file(
                         part_url, part_path, part_http_cb, {}, part_download_opts);

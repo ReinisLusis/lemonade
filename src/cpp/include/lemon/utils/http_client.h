@@ -93,6 +93,17 @@ struct DownloadOptions {
     // for non-LFS file ETags. SHA256 is used for LFS objects and release assets.
     std::string expected_hash;
     std::string expected_hash_algorithm;
+
+    // Identity for the persistent job record this transfer belongs to, so a
+    // download interrupted by a close, a crash or a reboot is resumed rather
+    // than restarted, and so the download list survives a server restart.
+    // Leave job_group_id empty and the transfer is still tracked, just not
+    // attributed to a user-visible row.
+    std::string job_group_id;
+    std::string job_display_name;
+    std::string job_file;
+    int job_file_index = -1;
+    int job_total_files = 0;
 };
 
 class HttpClient {

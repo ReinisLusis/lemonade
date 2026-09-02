@@ -5252,6 +5252,8 @@ void ModelManager::download_from_manifest(const json& manifest, std::map<std::st
     int file_index = 0;
     std::string download_path = manifest["download_path"].get<std::string>();
     int total_files = manifest["files_count"].get<int>();
+    const std::string job_display_name =
+        manifest.value("display_name", manifest.value("repo_id", std::string()));
 
 
     // Compute total download size across all files for accurate progress reporting
@@ -5409,6 +5411,12 @@ void ModelManager::download_from_manifest(const json& manifest, std::map<std::st
             download_opts.expected_hash_algorithm = "sha256";
             download_opts.expected_hash = file_desc["sha256"].get<std::string>();
         }
+
+        download_opts.job_display_name = job_display_name;
+        download_opts.job_group_id = job_display_name.empty() ? "" : "model:" + job_display_name;
+        download_opts.job_file = filename;
+        download_opts.job_file_index = file_index;
+        download_opts.job_total_files = total_files;
 
         // Create progress callback that reports to both console and SSE callback
         // Returns bool: true = continue, false = cancel
@@ -5771,6 +5779,10 @@ void ModelManager::download_from_registry(const ModelInfo& info,
     const fs::path manifest_path =
         path_from_utf8(repo_snapshot_paths.at(main_repo_id)) / ".download_manifest.json";
     JsonUtils::save_to_file(manifest, path_to_utf8(manifest_path));
+    // Set after the marker file is written: the persistent download job needs
+    // the name this download is known by in /downloads, which the marker file
+    // has no use for.
+    manifest["display_name"] = info.model_name;
     download_from_manifest(manifest, headers, progress_callback);
     std::error_code manifest_ec;
     fs::remove(manifest_path, manifest_ec);

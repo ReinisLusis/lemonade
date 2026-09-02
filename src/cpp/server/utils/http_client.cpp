@@ -1,4 +1,5 @@
 #include <lemon/utils/http_client.h>
+#include <lemon/job/download.h>
 #include <lemon/utils/path_utils.h>
 #include <lemon/utils/aixlog.hpp>
 #include <curl/curl.h>
@@ -1207,6 +1208,55 @@ DownloadResult HttpClient::download_file(const std::string& url,
         }
     }
 
+    // Everything above this point returns without moving a byte. From here on
+    // the transfer has an identity that outlives this process: submitted or
+    // found, then claimed for as long as it is being worked on.
+    download::Context job_context;
+    job_context.url = url;
+    job_context.final_path = output_path;
+    job_context.partial_path = partial_path;
+    job_context.digest = options.expected_hash;
+    job_context.group_id = options.job_group_id;
+    job_context.display_name = options.job_display_name;
+    job_context.file = options.job_file;
+    job_context.file_index = options.job_file_index;
+    job_context.total_files = options.job_total_files;
+    job_context.may_resume = options.resume_partial;
+    // Hand it to the system downloader if this machine has one. Nothing here
+    // names what that is: a supervisor was discovered, so it gets the work, and
+    // whether it fetches the bytes itself or passes them further on is its
+    // business. On a machine with none, this returns false and the loop below
+    // runs exactly as it always did.
+    {
+        std::string offload_error;
+        if (download::offload(job_context, callback, offload_error)) {
+            DownloadResult handed;
+            handed.total_bytes = static_cast<size_t>(job_context.size);
+            if (offload_error.empty()) {
+                handed.success = true;
+                handed.bytes_downloaded = static_cast<size_t>(job_context.size);
+            } else if (offload_error == "cancelled") {
+                handed.cancelled = true;
+                handed.error_message = "Download cancelled";
+            } else if (offload_error == "paused") {
+                // Stopped on purpose, and not finished. Reported as a stop
+                // rather than a failure, because the partial and its checkpoint
+                // are intact and whoever comes back for this resumes from the
+                // byte the far side proved -- which is the entire difference
+                // between a pause and a cancel.
+                handed.cancelled = true;
+                handed.can_resume = true;
+                handed.error_message = "Download paused";
+            } else {
+                handed.error_message = offload_error;
+                handed.can_resume = true;  // the partial and its checkpoint survive
+            }
+            return handed;
+        }
+    }
+
+    download::Tracker job(job_context);
+
     for (int attempt = 0; attempt <= options.max_retries; ++attempt) {
         if (attempt > 0) {
             LOG(INFO, "Download") << " Retry " << attempt << "/" << options.max_retries
@@ -1228,12 +1278,19 @@ DownloadResult HttpClient::download_file(const std::string& url,
         }
 
         ProgressCallback adjusted_callback = nullptr;
-        if (callback) {
-            adjusted_callback = [callback, resume_offset](size_t current, size_t total) -> bool {
-                if (total > 0) {
-                    return callback(resume_offset + current, resume_offset + total);
+        if (callback || job.active()) {
+            adjusted_callback = [callback, resume_offset, &job](size_t current,
+                                                               size_t total) -> bool {
+                const size_t done = resume_offset + current;
+                const size_t whole = total > 0 ? resume_offset + total : 0;
+                job.observe(done, whole);
+                if (!callback) {
+                    return true;
                 }
-                return callback(resume_offset + current, 0);
+                if (total > 0) {
+                    return callback(done, whole);
+                }
+                return callback(done, 0);
             };
         }
 
@@ -1302,6 +1359,12 @@ DownloadResult HttpClient::download_file(const std::string& url,
             if (ec) {
                 final_result.success = false;
                 final_result.error_message = "Download succeeded but failed to rename file: " + ec.message();
+                job.mark_failed(final_result.error_message);
+            } else {
+                // Verified and in place, but nothing has taken delivery of it
+                // yet — that is the layer above, which may not even be running.
+                job.mark_transferred(static_cast<std::int64_t>(resume_offset +
+                                                               final_result.bytes_downloaded));
             }
             return final_result;
         }
@@ -1359,6 +1422,7 @@ DownloadResult HttpClient::download_file(const std::string& url,
     }
 
     final_result.error_message = oss.str();
+    job.mark_failed(final_result.error_message);
     return final_result;
 }
 

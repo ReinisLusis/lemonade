@@ -977,6 +977,11 @@ set(SOURCES_CORE
     src/cpp/server/logging_config.cpp
     src/cpp/server/log_stream.cpp
     src/cpp/server/prometheus_metrics.cpp
+    src/cpp/job/discovery.cpp
+    src/cpp/job/record.cpp
+    src/cpp/job/store.cpp
+    src/cpp/storage/storage.cpp
+    src/cpp/server/utils/download_job.cpp
     src/cpp/server/utils/http_client.cpp
     src/cpp/server/utils/json_utils.cpp
     src/cpp/server/utils/process_manager.cpp
@@ -2530,6 +2535,43 @@ if(BUILD_TESTING AND EXISTS "${_JOB_EXPR_TEST_SRC}")
     target_link_libraries(test_job_expr PRIVATE nlohmann_json::nlohmann_json)
     include(CTest)
     add_cpp_ci_test(JobExprTest CI ON COMMAND test_job_expr)
+endif()
+
+# Cross-language job record: the exact bytes written, the refusals, and the
+# epoch fencing. Everything one process can prove alone; the rest is
+# scripts/conformance.sh, which runs this against the Go and Python peers.
+set(_JOB_RECORD_TEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/test_job_record.cpp")
+if(BUILD_TESTING AND EXISTS "${_JOB_RECORD_TEST_SRC}")
+    add_executable(test_job_record
+        test/cpp/test_job_record.cpp
+        src/cpp/job/record.cpp
+        src/cpp/job/store.cpp
+    )
+    target_include_directories(test_job_record PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
+        ${CMAKE_CURRENT_BINARY_DIR}/include
+    )
+    target_link_libraries(test_job_record PRIVATE nlohmann_json::nlohmann_json)
+    include(CTest)
+    add_cpp_ci_test(JobRecordTest CI ON COMMAND test_job_record)
+endif()
+
+# Storage: the two-phase commit, and that a placed blob is not findable until it
+# has actually arrived. The property that matters most here is not testable at
+# runtime at all -- a Ref carries no path to concatenate, so `final + ".partial"`
+# fails to COMPILE -- and this covers the half that can be asserted.
+set(_STORAGE_TEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/test_storage.cpp")
+if(BUILD_TESTING AND EXISTS "${_STORAGE_TEST_SRC}")
+    add_executable(test_storage
+        test/cpp/test_storage.cpp
+        src/cpp/storage/storage.cpp
+    )
+    target_include_directories(test_storage PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
+        ${CMAKE_CURRENT_BINARY_DIR}/include
+    )
+    include(CTest)
+    add_cpp_ci_test(StorageTest CI ON COMMAND test_storage)
 endif()
 
 set(_JOB_GRAPH_TEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/test_job_graph.cpp")

@@ -111,6 +111,10 @@ bool TrayUI::initialize() {
         if (!silent_) {
             show_notification("Woohoo!", "Lemonade Server is running! Right-click the tray icon to access options.");
         }
+        // Off the UI thread: this asks the server a question over HTTP, and a
+        // tray icon that stops responding while it waits is a worse bug than
+        // the missing notice it is here to fix.
+        std::thread([this]() { announce_delivered_downloads(); }).detach();
     });
 
 #ifdef _WIN32
@@ -746,6 +750,54 @@ void TrayUI::show_notification(const std::string& title, const std::string& mess
     if (tray_) {
         tray_->show_notification(title, message);
     }
+}
+
+void TrayUI::announce_delivered_downloads() {
+    std::string body = http_get("/api/v1/downloads/delivered");
+    if (body.empty()) {
+        return;
+    }
+
+    std::vector<std::string> names;
+    try {
+        auto delivered = nlohmann::json::parse(body);
+        if (!delivered.is_array()) {
+            return;
+        }
+        for (const auto& item : delivered) {
+            // One notice per download, not per file: a model is a dozen files
+            // and a dozen toasts for one download is not a notification, it is
+            // a punishment.
+            std::string name = item.value("model_name", std::string());
+            if (name.empty()) {
+                name = item.value("group_id", std::string());
+            }
+            if (name.empty()) {
+                continue;
+            }
+            if (std::find(names.begin(), names.end(), name) == names.end()) {
+                names.push_back(name);
+            }
+        }
+    } catch (const std::exception&) {
+        return;  // nothing to announce beats a startup error nobody can act on
+    }
+
+    if (names.empty()) {
+        return;
+    }
+    if (names.size() == 1) {
+        show_notification("Download finished", names[0] + " finished downloading while you were away.");
+        return;
+    }
+
+    std::ostringstream msg;
+    msg << names.size() << " downloads finished while you were away: ";
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) msg << ", ";
+        msg << names[i];
+    }
+    show_notification("Downloads finished", msg.str());
 }
 
 } // namespace lemon_tray

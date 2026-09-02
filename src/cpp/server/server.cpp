@@ -11,6 +11,7 @@
 #include "lemon/routing_policy.h"
 #include "lemon/routing_policy_parser.h"
 #include "lemon/config_file.h"
+#include "lemon/job/download.h"
 #include "lemon/jobs/job_manager.h"
 #include "lemon/mcp_server.h"
 #include "lemon/mcp_client.h"
@@ -672,6 +673,27 @@ Server::Server(std::shared_ptr<RuntimeConfig> config,
         router_.get(),
         config_->host(),
         config_->websocket_port());
+
+    // Reconcile downloads left behind by a previous run against what is
+    // actually on disk, before anything can ask for one of those files.
+    download::adopt_orphans();
+
+    // And close out the ones that had already finished. A transfer that
+    // completed while this application was closed sits at TRANSFERRED -- proven
+    // bytes that nobody has said they have -- and is excluded from the orphan
+    // sweep on purpose, because adopting it would fetch a finished file again.
+    // Nothing else was going to move it, so it showed up as a row at 100%
+    // labelled paused with a resume button that could do nothing.
+    for (const auto& record : download::take_delivery()) {
+        const std::string name = download::spec_string(record, "display_name");
+        delivered_at_startup_.push_back({
+            {"id", record.id},
+            {"group_id", download::spec_string(record, "group_id")},
+            {"model_name", name},
+            {"file", download::spec_string(record, "file")},
+            {"bytes", record.progress.done}
+        });
+    }
 
     start_model_cache_warmup();
 }
@@ -1358,6 +1380,10 @@ void Server::setup_routes(httplib::Server &web_server) {
 
     register_get("downloads", [this](const httplib::Request& req, httplib::Response& res) {
         handle_downloads(req, res);
+    });
+
+    register_get("downloads/delivered", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_downloads_delivered(req, res);
     });
 
     register_post("downloads/control", [this](const httplib::Request& req, httplib::Response& res) {
@@ -7468,6 +7494,15 @@ std::shared_ptr<Server::DownloadJob> Server::start_download_job(
     const std::string& display_name,
     std::function<void(DownloadProgressCallback)> operation) {
 
+    // Starting is also RESUMING, and a resume has to withdraw the pause.
+    //
+    // The UI has no separate resume action: it re-issues the pull, and this
+    // function deduplicates by download id. So this is the only place that can
+    // say "run again". Without it a pause would be permanent -- the record would
+    // keep asking every owner to stop, and a supervisor honouring intent
+    // correctly would refuse to touch it forever.
+    download::intend(download_id, lemon::job::want::kRun, "lemonade-ui");
+
     std::shared_ptr<DownloadJob> old_job;
     auto job = std::make_shared<DownloadJob>();
     job->id = download_id;
@@ -7603,7 +7638,12 @@ std::shared_ptr<Server::DownloadJob> Server::start_download_job(
             }
 
             std::lock_guard<std::mutex> lock(downloads_mutex_);
-            if (job->cancel_requested) {
+            // A pause no longer sets cancel_requested -- that flag is what makes
+            // a worker write a terminal cancelled state to the shared record,
+            // which is the lie being fixed. So a deliberate stop now has two
+            // shapes, and reading only the flag reported a paused download as an
+            // error: the worker stopped on purpose and nothing here knew it.
+            if (job->cancel_requested || job->cancel_action == "pause") {
                 job->status = job->cancel_action == "cancel" ? "cancelled" : "paused";
                 job->error.clear();
             } else {
@@ -7702,9 +7742,110 @@ void Server::stream_download_operation(
 
 
 
+// Rows for downloads this process is not running: work left unfinished by a
+// previous run, or started by another process against the same store. They are
+// derived from the job records on disk, never stored here, so the two sources
+// cannot drift.
+nlohmann::json Server::persisted_download_rows() const {
+    std::map<std::string, nlohmann::json> rows;
+    // Groups with at least one file that has not finished.
+    std::set<std::string> unfinished;
+
+    for (const auto& record : download::unfinished_jobs()) {
+        const std::string group = download::spec_string(record, "group_id");
+        const std::string display = download::spec_string(record, "display_name");
+        const int64_t file_total = download::spec_int(record, "artifact.size");
+
+        nlohmann::json& row = rows[group];
+        if (row.is_null()) {
+            row = {
+                {"id", group},
+                {"type", group.rfind("backend:", 0) == 0 ? "backend" : "model"},
+                {"model_name", display},
+                {"file", download::spec_string(record, "file")},
+                {"file_index", static_cast<int>(download::spec_int(record, "file_index"))},
+                {"total_files", static_cast<int>(download::spec_int(record, "total_files"))},
+                {"bytes_downloaded", 0},
+                {"bytes_total", 0},
+                {"total_download_size", 0},
+                {"bytes_previously_downloaded", 0},
+                {"completed_files_bytes", 0},
+                {"cumulative_bytes_downloaded", 0},
+                {"overall_bytes_downloaded", 0},
+                {"percent", 0},
+                {"complete", false},
+                // Filled in from the record's own state below. It used to be
+                // hardcoded "paused", which was right for one case and a lie for
+                // the others: a finished download appeared as a row stuck at
+                // 100% labelled paused, offering a resume button that could not
+                // do anything, because there was nothing left to fetch.
+                {"status", "paused"},
+                {"running", false}
+            };
+        }
+
+        const uint64_t done = static_cast<uint64_t>(record.progress.done < 0 ? 0
+                                                                            : record.progress.done);
+        const uint64_t cumulative =
+            row.value("cumulative_bytes_downloaded", uint64_t{0}) + done;
+        const uint64_t total =
+            row.value("total_download_size", uint64_t{0}) +
+            static_cast<uint64_t>(file_total > 0 ? file_total : record.progress.total);
+        row["cumulative_bytes_downloaded"] = cumulative;
+        row["overall_bytes_downloaded"] = cumulative;
+        row["bytes_downloaded"] = cumulative;
+        row["total_download_size"] = total;
+        row["bytes_total"] = total;
+        row["percent"] = total > 0 ? static_cast<int>((cumulative * 100) / total) : 0;
+        if (!record.error.empty()) {
+            row["error"] = record.error;
+        }
+
+        // A group is only finished when every file in it is, so one unfinished
+        // file keeps the whole row unfinished no matter what order they arrive
+        // in.
+        if (record.state != lemon::job::state::kComplete) {
+            unfinished.insert(group);
+        }
+    }
+
+    // Say what the records actually say. This used to be hardcoded "paused" for
+    // every row, so a download that had finished while the application was
+    // closed came back as a row stuck at 100% labelled paused, with a resume
+    // button that could not do anything because there was nothing left to fetch.
+    for (auto& [group, row] : rows) {
+        const bool done = unfinished.find(group) == unfinished.end();
+        row["status"] = done ? "completed" : "paused";
+        row["complete"] = done;
+        if (done) {
+            row["percent"] = 100;
+        }
+    }
+
+    nlohmann::json out = nlohmann::json::array();
+    for (auto& [group, row] : rows) {
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+// What arrived while nobody was watching.
+//
+// The two-phase ending exists so that "the service finished this while your
+// application was closed" is expressible at all, and this is the half a person
+// sees: by the time any UI is up the records have already been completed, so
+// without this there is no way left to tell them it happened. Answering the
+// same list to every client, and never draining it, is deliberate -- a client
+// decides for itself whether it has already said something, and losing the
+// notice because another client asked first would be worse than repeating it.
+void Server::handle_downloads_delivered(const httplib::Request&, httplib::Response& res) {
+    res.set_content(delivered_at_startup_.dump(), "application/json");
+}
+
 void Server::handle_downloads(const httplib::Request&, httplib::Response& res) {
     nlohmann::json response = nlohmann::json::array();
     std::vector<std::shared_ptr<DownloadJob>> expired_jobs;
+    std::set<std::string> live_ids;
     const auto now = std::chrono::steady_clock::now();
 
     {
@@ -7712,6 +7853,7 @@ void Server::handle_downloads(const httplib::Request&, httplib::Response& res) {
         for (auto it = download_jobs_.begin(); it != download_jobs_.end();) {
             const auto& job = it->second;
             if (is_download_job_visible(job)) {
+                live_ids.insert(job->id);
                 response.push_back(download_job_to_json(job));
                 ++it;
                 continue;
@@ -7734,6 +7876,14 @@ void Server::handle_downloads(const httplib::Request&, httplib::Response& res) {
 
     for (auto& job : expired_jobs) {
         join_download_job(job);
+    }
+
+    // A live worker is the better description of a download it is running, so
+    // the persisted row only fills gaps: transfers this process never started.
+    for (auto& row : persisted_download_rows()) {
+        if (live_ids.count(row.value("id", std::string())) == 0) {
+            response.push_back(std::move(row));
+        }
     }
 
     res.set_content(response.dump(), "application/json");
@@ -7775,9 +7925,37 @@ void Server::handle_download_control(const httplib::Request& req, httplib::Respo
                     job->status == "error";
 
                 if (!terminal) {
-                    job->cancel_requested = true;
+                    // Say what is wanted, in the one place every participant can
+                    // see it, BEFORE touching anything local.
+                    //
+                    // This process is frequently not the one moving the bytes.
+                    // The transfer may be in BITS, or on a NAS, continuing while
+                    // this application is closed -- and stopping our own worker
+                    // says nothing to either of them. It showed: a pause here
+                    // marked the local job "paused", wrote a terminal cancel to
+                    // the shared record, and the NAS carried on and finished a
+                    // 3.1 GB model nobody would collect.
+                    //
+                    // Intent is the field for this and needs no lease, because
+                    // whoever wants a job stopped is almost never the process
+                    // doing it. The owner converges at its next checkpoint,
+                    // wherever it is running.
+                    download::intend(id,
+                                     action == "cancel" ? lemon::job::want::kCancel
+                                                        : lemon::job::want::kPause,
+                                     "lemonade-ui");
+
                     job->cancel_action = action;
                     job->status = action == "cancel" ? "cancelled" : "paused";
+                    // A cancel still stops our own worker directly. A PAUSE must
+                    // not: cancel_requested is what makes the worker write a
+                    // terminal cancelled state to the shared record, which is
+                    // exactly the lie being fixed -- a paused download is not a
+                    // finished one, and it has to remain resumable by whoever
+                    // picks it up next.
+                    if (action == "cancel") {
+                        job->cancel_requested = true;
+                    }
                     // Paused jobs remain visible until resumed/removed. A cancel
                     // request for an already-stopped job has no worker that will
                     // later stamp terminal_since, so start the terminal visibility

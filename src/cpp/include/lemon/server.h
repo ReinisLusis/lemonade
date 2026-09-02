@@ -231,6 +231,7 @@ private:
     // Download manager endpoints and server-owned download jobs
     void handle_downloads(const httplib::Request& req, httplib::Response& res);
     void handle_download_control(const httplib::Request& req, httplib::Response& res);
+    void handle_downloads_delivered(const httplib::Request& req, httplib::Response& res);
 
     // Shared SSE streaming helper for legacy download operations. The operation
     // remains tied to this response for backwards compatibility.
@@ -265,6 +266,7 @@ private:
         std::thread worker;
     };
 
+    nlohmann::json persisted_download_rows() const;
     nlohmann::json download_progress_to_json(const DownloadProgress& progress);
     nlohmann::json download_job_to_json(const std::shared_ptr<DownloadJob>& job);
     bool is_download_job_visible(const std::shared_ptr<DownloadJob>& job) const;
@@ -390,6 +392,11 @@ private:
 
     std::mutex downloads_mutex_;
     std::map<std::string, std::shared_ptr<DownloadJob>> download_jobs_;
+    // Downloads that finished while this application was not running, taken
+    // delivery of at start-up. Kept so a client that connects afterwards can
+    // still tell somebody: by the time any UI is up, the transition has already
+    // happened and the records look like any other finished download.
+    nlohmann::json delivered_at_startup_ = nlohmann::json::array();
 
     bool running_;
     bool startup_failed_ = false;
