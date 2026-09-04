@@ -14,7 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <lemon/job/store.h>
+#include <abstraction/job/store.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -94,7 +94,7 @@ private:
 
 // The store every download job lives in, rooted under the Lemonade cache
 // directory. Returns nullptr when it could not be opened.
-job::FileStore* store();
+abstraction::job::FileStore* store();
 
 // At start-up, reconcile every download job nobody holds with what is actually
 // on disk. This is the payoff: Lemonade closed mid-download, reopened, and the
@@ -119,7 +119,7 @@ void adopt_orphans();
 //
 // Returns what it took delivery of, so a client can tell somebody. That list is
 // exactly the set of downloads that finished while they were not watching.
-std::vector<job::Record> take_delivery();
+std::vector<abstraction::job::Record> take_delivery();
 
 // Say what should happen to every unfinished transfer in a download.
 //
@@ -148,11 +148,11 @@ int intend(const std::string& group_id, const std::string& want, const std::stri
 
 // Every download job that is not yet finished, for rebuilding the user-visible
 // download list after a restart.
-std::vector<job::Record> unfinished_jobs();
+std::vector<abstraction::job::Record> unfinished_jobs();
 
 // The parts of a download spec the server needs to describe a row.
-std::string spec_string(const job::Record& r, const char* key);
-std::int64_t spec_int(const job::Record& r, const char* key);
+std::string spec_string(const abstraction::job::Record& r, const char* key);
+std::int64_t spec_int(const abstraction::job::Record& r, const char* key);
 
 // Hand this transfer to the system downloader, if this machine has one.
 //

@@ -11,7 +11,7 @@
 #include "lemon/routing_policy.h"
 #include "lemon/routing_policy_parser.h"
 #include "lemon/config_file.h"
-#include "lemon/job/download.h"
+#include "lemon/download_job.h"
 #include "lemon/jobs/job_manager.h"
 #include "lemon/mcp_server.h"
 #include "lemon/mcp_client.h"
@@ -7501,7 +7501,7 @@ std::shared_ptr<Server::DownloadJob> Server::start_download_job(
     // say "run again". Without it a pause would be permanent -- the record would
     // keep asking every owner to stop, and a supervisor honouring intent
     // correctly would refuse to touch it forever.
-    download::intend(download_id, lemon::job::want::kRun, "lemonade-ui");
+    download::intend(download_id, abstraction::job::want::kRun, "lemonade-ui");
 
     std::shared_ptr<DownloadJob> old_job;
     auto job = std::make_shared<DownloadJob>();
@@ -7804,7 +7804,7 @@ nlohmann::json Server::persisted_download_rows() const {
         // A group is only finished when every file in it is, so one unfinished
         // file keeps the whole row unfinished no matter what order they arrive
         // in.
-        if (record.state != lemon::job::state::kComplete) {
+        if (record.state != abstraction::job::state::kComplete) {
             unfinished.insert(group);
         }
     }
@@ -7941,8 +7941,8 @@ void Server::handle_download_control(const httplib::Request& req, httplib::Respo
                     // doing it. The owner converges at its next checkpoint,
                     // wherever it is running.
                     download::intend(id,
-                                     action == "cancel" ? lemon::job::want::kCancel
-                                                        : lemon::job::want::kPause,
+                                     action == "cancel" ? abstraction::job::want::kCancel
+                                                        : abstraction::job::want::kPause,
                                      "lemonade-ui");
 
                     job->cancel_action = action;

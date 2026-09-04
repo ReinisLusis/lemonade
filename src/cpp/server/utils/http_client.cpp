@@ -1,5 +1,5 @@
 #include <lemon/utils/http_client.h>
-#include <lemon/job/download.h>
+#include <lemon/download_job.h>
 #include <lemon/utils/path_utils.h>
 #include <lemon/utils/aixlog.hpp>
 #include <curl/curl.h>

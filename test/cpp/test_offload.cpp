@@ -13,8 +13,8 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
-#include <lemon/job/discovery.h>
-#include <lemon/job/download.h>
+#include <abstraction/job/discovery.h>
+#include <lemon/download_job.h>
 #include <string>
 #include <thread>
 
@@ -29,8 +29,8 @@ static void check(const char* name, bool ok) {
 }
 
 int main(int argc, char** argv) {
-    const std::string store = job::machine_store();
-    const job::Supervisor sup = job::supervisor_of(store);
+    const std::string store = abstraction::job::machine_store();
+    const abstraction::job::Supervisor sup = abstraction::job::supervisor_of(store);
 
     std::printf("machine store : %s\n", store.empty() ? "(none configured)" : store.c_str());
     std::printf("supervisor    : %s%s\n", sup.owner.empty() ? "(none)" : sup.owner.c_str(),

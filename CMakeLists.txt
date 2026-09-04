@@ -340,6 +340,26 @@ endif()
 
 # === nlohmann/json ===
 if(NOT USE_SYSTEM_JSON)
+    # The job and storage abstractions, shared with the Go and Python
+    # implementations of the same contract. These used to be twelve vendored
+    # files under src/cpp/job and src/cpp/storage, in this project's own
+    # namespace -- a facade named after one of its consumers, which meant any
+    # other adopter would have had to vendor a fork of Lemonade to get an
+    # interface that has nothing to do with Lemonade.
+    #
+    # Pinned to a sha rather than a branch, like every other dependency here.
+    # The record format is a cross-language contract; an adopter tracking a
+    # branch could find the way its downloads are recorded changed by somebody
+    # else's commit.
+    FetchContent_Declare(abstraction
+        GIT_REPOSITORY https://github.com/ReinisLusis/ai-abstractions.git
+        GIT_TAG        main  # TODO: pin to a sha once the repo is published
+        GIT_SHALLOW    TRUE
+        EXCLUDE_FROM_ALL
+    )
+    set(ABSTRACTION_BUILD_TESTS OFF CACHE INTERNAL "")
+    set(ABSTRACTION_BUILD_TOOLS OFF CACHE INTERNAL "")
+
     FetchContent_Declare(json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
         GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03  # v3.11.3
@@ -348,6 +368,7 @@ if(NOT USE_SYSTEM_JSON)
     set(JSON_BuildTests OFF CACHE INTERNAL "")
     set(JSON_Install OFF CACHE INTERNAL "")
     FetchContent_MakeAvailable(json)
+    FetchContent_MakeAvailable(abstraction)
 endif()
 
 # === CLI11 ===
@@ -977,10 +998,6 @@ set(SOURCES_CORE
     src/cpp/server/logging_config.cpp
     src/cpp/server/log_stream.cpp
     src/cpp/server/prometheus_metrics.cpp
-    src/cpp/job/discovery.cpp
-    src/cpp/job/record.cpp
-    src/cpp/job/store.cpp
-    src/cpp/storage/storage.cpp
     src/cpp/server/utils/download_job.cpp
     src/cpp/server/utils/http_client.cpp
     src/cpp/server/utils/json_utils.cpp
@@ -1133,6 +1150,8 @@ endif()
 target_link_libraries(lemonade-server-core PUBLIC
     nlohmann_json::nlohmann_json
     lemonade-httplib
+    abstraction::job
+    abstraction::storage
 )
 
 if(USE_SYSTEM_CLI11)
@@ -2537,42 +2556,9 @@ if(BUILD_TESTING AND EXISTS "${_JOB_EXPR_TEST_SRC}")
     add_cpp_ci_test(JobExprTest CI ON COMMAND test_job_expr)
 endif()
 
-# Cross-language job record: the exact bytes written, the refusals, and the
-# epoch fencing. Everything one process can prove alone; the rest is
-# scripts/conformance.sh, which runs this against the Go and Python peers.
-set(_JOB_RECORD_TEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/test_job_record.cpp")
-if(BUILD_TESTING AND EXISTS "${_JOB_RECORD_TEST_SRC}")
-    add_executable(test_job_record
-        test/cpp/test_job_record.cpp
-        src/cpp/job/record.cpp
-        src/cpp/job/store.cpp
-    )
-    target_include_directories(test_job_record PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
-        ${CMAKE_CURRENT_BINARY_DIR}/include
-    )
-    target_link_libraries(test_job_record PRIVATE nlohmann_json::nlohmann_json)
-    include(CTest)
-    add_cpp_ci_test(JobRecordTest CI ON COMMAND test_job_record)
-endif()
-
-# Storage: the two-phase commit, and that a placed blob is not findable until it
-# has actually arrived. The property that matters most here is not testable at
-# runtime at all -- a Ref carries no path to concatenate, so `final + ".partial"`
-# fails to COMPILE -- and this covers the half that can be asserted.
-set(_STORAGE_TEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/test_storage.cpp")
-if(BUILD_TESTING AND EXISTS "${_STORAGE_TEST_SRC}")
-    add_executable(test_storage
-        test/cpp/test_storage.cpp
-        src/cpp/storage/storage.cpp
-    )
-    target_include_directories(test_storage PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
-        ${CMAKE_CURRENT_BINARY_DIR}/include
-    )
-    include(CTest)
-    add_cpp_ci_test(StorageTest CI ON COMMAND test_storage)
-endif()
+# The job record and storage tests live with the abstraction now, and run in its
+# own build. Keeping copies here would have meant two places to update whenever
+# the contract changed, and the cross-language harness already runs the C++ one.
 
 set(_JOB_GRAPH_TEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/test_job_graph.cpp")
 if(BUILD_TESTING AND EXISTS "${_JOB_GRAPH_TEST_SRC}")

@@ -1,9 +1,9 @@
-#include <lemon/job/download.h>
+#include <lemon/download_job.h>
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <lemon/job/discovery.h>
+#include <abstraction/job/discovery.h>
 #include <lemon/utils/aixlog.hpp>
 #include <lemon/utils/path_utils.h>
 #include <memory>
@@ -32,8 +32,8 @@ namespace download {
 
 namespace {
 
-using job::Json;
-using job::Record;
+using abstraction::job::Json;
+using abstraction::job::Record;
 
 // The lease outlives a stall but not a crash by much: long enough that a slow
 // link does not lose ownership between checkpoints, short enough that a killed
@@ -110,10 +110,10 @@ std::int64_t spec_int(const Record& r, const char* key) {
     return (node != nullptr && node->is_number_integer()) ? node->get<std::int64_t>() : 0;
 }
 
-job::FileStore* store() {
+abstraction::job::FileStore* store() {
     static std::mutex mutex;
     static bool tried = false;
-    static std::unique_ptr<job::FileStore> instance;
+    static std::unique_ptr<abstraction::job::FileStore> instance;
 
     std::lock_guard<std::mutex> lock(mutex);
     if (!tried) {
@@ -132,12 +132,12 @@ job::FileStore* store() {
         // With one store there is nothing to copy. Handing over stops being a
         // transfer of ownership and becomes what it always should have been:
         // not picking the job up yourself.
-        std::string root = job::machine_store();
+        std::string root = abstraction::job::machine_store();
         if (root.empty()) {
             root = utils::path_to_utf8(utils::path_from_utf8(utils::get_cache_dir()) / "jobs");
         }
         try {
-            instance = std::make_unique<job::FileStore>(root);
+            instance = std::make_unique<abstraction::job::FileStore>(root);
         } catch (const std::exception& e) {
             LOG(WARNING, "DownloadJob") << "job store unavailable, downloads will not be "
                                            "resumable across restarts: "
@@ -162,7 +162,7 @@ struct Tracker::State {
 };
 
 Tracker::Tracker(const Context& ctx) {
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr || ctx.final_path.empty()) {
         return;
     }
@@ -229,7 +229,7 @@ Tracker::Tracker(const Context& ctx) {
                 state_->verified_prefix = prefix.get<std::int64_t>();
             }
         }
-    } catch (const job::LeaseHeld& e) {
+    } catch (const abstraction::job::LeaseHeld& e) {
         // Somebody holds the lease. Let the transfer carry on — refusing here
         // would be a behaviour change — but KEEP TRYING, because the holder is
         // very often gone.
@@ -261,7 +261,7 @@ Tracker::~Tracker() {
     if (!state_ || !state_->holding) {
         return;
     }
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return;
     }
@@ -289,7 +289,7 @@ void Tracker::take_over_if_free() {
     }
     state_->next_claim_attempt = now + kCheckpointInterval;
 
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr || state_->id.empty()) {
         return;
     }
@@ -328,7 +328,7 @@ void Tracker::observe(std::size_t downloaded, std::size_t total) {
         return;
     }
 
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return;
     }
@@ -346,23 +346,23 @@ void Tracker::observe(std::size_t downloaded, std::size_t total) {
             if (total > 0) {
                 r.progress.total = static_cast<std::int64_t>(total);
             }
-            r.progress.updated_at = job::Clock::now();
+            r.progress.updated_at = abstraction::job::Clock::now();
             Json checkpoint = Json::object();
             checkpoint["verified_prefix"] = proven;
             r.checkpoint = std::move(checkpoint);
             // Renewing inside the same write keeps one owner's liveness,
             // progress and resume point on a single channel.
             r.lease.expires_at =
-                job::Clock::now() + std::chrono::duration_cast<job::TimePoint::duration>(kLeaseTtl);
+                abstraction::job::Clock::now() + std::chrono::duration_cast<abstraction::job::TimePoint::duration>(kLeaseTtl);
         });
         state_->last_checkpoint = now;
         state_->last_checkpoint_bytes = done;
-    } catch (const job::StaleEpoch& e) {
+    } catch (const abstraction::job::StaleEpoch& e) {
         // Someone else took the job over. Stop writing rather than fight for
         // it: two owners writing one file is the damage the epoch prevents.
         LOG(WARNING, "DownloadJob") << "lost the lease mid-transfer: " << e.what() << std::endl;
         state_->holding = false;
-    } catch (const job::LeaseExpired& e) {
+    } catch (const abstraction::job::LeaseExpired& e) {
         LOG(WARNING, "DownloadJob") << "lease expired mid-transfer: " << e.what() << std::endl;
         state_->holding = false;
     } catch (const std::exception& e) {
@@ -374,17 +374,17 @@ void Tracker::mark_transferred(std::int64_t bytes) {
     if (!active()) {
         return;
     }
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return;
     }
     try {
         jobs->update(state_->id, state_->epoch, [&](Record& r) {
-            r.state = job::state::kTransferred;
+            r.state = abstraction::job::state::kTransferred;
             if (bytes > 0) {
                 r.progress.done = bytes;
             }
-            r.progress.updated_at = job::Clock::now();
+            r.progress.updated_at = abstraction::job::Clock::now();
             Json checkpoint = Json::object();
             checkpoint["verified_prefix"] = bytes > 0 ? bytes : r.progress.done;
             r.checkpoint = std::move(checkpoint);
@@ -399,7 +399,7 @@ void Tracker::mark_failed(const std::string& message) {
     if (!active()) {
         return;
     }
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return;
     }
@@ -414,7 +414,7 @@ void Tracker::mark_failed(const std::string& message) {
 }
 
 void adopt_orphans() {
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return;
     }
@@ -447,19 +447,19 @@ void adopt_orphans() {
                     // The file is where it was meant to end up, so delivery has
                     // in fact been taken; the process that would have said so
                     // is gone.
-                    r.state = job::state::kComplete;
+                    r.state = abstraction::job::state::kComplete;
                 } else if (partial_bytes > 0) {
                     // Leave it claimable. The next transfer of this artifact
                     // finds it, inherits the checkpoint and resumes.
-                    r.state = job::state::kPending;
+                    r.state = abstraction::job::state::kPending;
                     r.progress.done = partial_bytes;
                     r.lease.owner.clear();
-                    r.lease.expires_at = job::Clock::now();
+                    r.lease.expires_at = abstraction::job::Clock::now();
                 } else {
-                    r.state = job::state::kCancelled;
+                    r.state = abstraction::job::state::kCancelled;
                     r.error = "no bytes on disk when adopted";
                 }
-                r.progress.updated_at = job::Clock::now();
+                r.progress.updated_at = abstraction::job::Clock::now();
             });
             if (have_final) {
                 ++delivered;
@@ -482,7 +482,7 @@ void adopt_orphans() {
 }
 
 std::vector<Record> take_delivery() {
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return {};
     }
@@ -498,7 +498,7 @@ std::vector<Record> take_delivery() {
 
     std::vector<Record> delivered;
     for (const Record& r : all) {
-        if (r.kind != kKind || r.state != job::state::kTransferred) {
+        if (r.kind != kKind || r.state != abstraction::job::state::kTransferred) {
             continue;
         }
 
@@ -532,12 +532,12 @@ std::vector<Record> take_delivery() {
         try {
             const Record claimed = jobs->claim(r.id, owner_name(), kLeaseTtl);
             jobs->update(r.id, claimed.lease.epoch, [](Record& rec) {
-                rec.state = job::state::kComplete;
-                rec.progress.updated_at = job::Clock::now();
+                rec.state = abstraction::job::state::kComplete;
+                rec.progress.updated_at = abstraction::job::Clock::now();
                 rec.error.clear();
             });
             delivered.push_back(jobs->load(r.id));
-        } catch (const job::LeaseHeld&) {
+        } catch (const abstraction::job::LeaseHeld&) {
             // Somebody is on it. Not a failure and not worth a warning: the
             // owner that proved these bytes may only just have stopped, and its
             // lease lapses on its own within the TTL. The next start closes the
@@ -557,7 +557,7 @@ std::vector<Record> take_delivery() {
 }
 
 int intend(const std::string& group_id, const std::string& want, const std::string& by) {
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr || group_id.empty()) {
         return 0;
     }
@@ -596,7 +596,7 @@ int intend(const std::string& group_id, const std::string& want, const std::stri
 }
 
 std::vector<Record> unfinished_jobs() {
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr) {
         return {};
     }
@@ -620,10 +620,10 @@ std::vector<Record> unfinished_jobs() {
             // the question this answers is "what happened while I was away",
             // not "what have I ever downloaded".
             if (r.terminal()) {
-                if (r.state != job::state::kComplete) {
+                if (r.state != abstraction::job::state::kComplete) {
                     continue;  // failed and cancelled are not news
                 }
-                const auto age = job::Clock::now() - r.updated_at;
+                const auto age = abstraction::job::Clock::now() - r.updated_at;
                 if (age > std::chrono::hours(24)) {
                     continue;
                 }
@@ -638,19 +638,19 @@ std::vector<Record> unfinished_jobs() {
 // ---------------------------------------------------------------- offload ---
 
 bool offload_available() {
-    const std::string root = job::machine_store();
-    return !root.empty() && job::supervisor_of(root).alive;
+    const std::string root = abstraction::job::machine_store();
+    return !root.empty() && abstraction::job::supervisor_of(root).alive;
 }
 
 bool offload(const Context& ctx,
              const std::function<bool(std::size_t, std::size_t)>& on_progress,
              std::string& error_out) {
-    job::FileStore* jobs = store();
+    abstraction::job::FileStore* jobs = store();
     if (jobs == nullptr || ctx.final_path.empty()) {
         return false;
     }
-    const std::string root = job::machine_store();
-    const job::Supervisor sup = root.empty() ? job::Supervisor{} : job::supervisor_of(root);
+    const std::string root = abstraction::job::machine_store();
+    const abstraction::job::Supervisor sup = root.empty() ? abstraction::job::Supervisor{} : abstraction::job::supervisor_of(root);
     if (!sup.alive) {
         return false;  // nothing better here; the caller fetches it itself
     }
@@ -723,7 +723,7 @@ bool offload(const Context& ctx,
     // sooner.
     LOG(INFO, "Download") << "left for the system downloader (" << sup.owner << "), job " << id
                           << std::endl;
-    job::nudge(root);
+    abstraction::job::nudge(root);
 
     // Wait, reading the record. This process is not moving bytes, but it is
     // still the one that promised a file, so it stays until there is one. Killed
@@ -748,7 +748,7 @@ bool offload(const Context& ctx,
                 try {
                     const Record held = jobs->claim(id, owner_name(), kLeaseTtl);
                     jobs->update(id, held.lease.epoch,
-                                 [](Record& r) { r.state = job::state::kCancelled; });
+                                 [](Record& r) { r.state = abstraction::job::state::kCancelled; });
                 } catch (const std::exception&) {
                 }
                 error_out = "cancelled";
@@ -765,15 +765,15 @@ bool offload(const Context& ctx,
         // its own side because it reads the same record, and the transfer stays
         // resumable by whoever comes back for it. Writing a terminal state here
         // is what turned a pause into a lost 3.1 GB download.
-        if (now.wants() == job::want::kPause) {
+        if (now.wants() == abstraction::job::want::kPause) {
             error_out = "paused";
             return true;
         }
 
-        if (now.state == job::state::kTransferred || now.state == job::state::kComplete) {
+        if (now.state == abstraction::job::state::kTransferred || now.state == abstraction::job::state::kComplete) {
             return true;
         }
-        if (now.state == job::state::kFailed || now.state == job::state::kCancelled) {
+        if (now.state == abstraction::job::state::kFailed || now.state == abstraction::job::state::kCancelled) {
             error_out = now.error.empty() ? "the system downloader gave up" : now.error;
             return true;
         }
