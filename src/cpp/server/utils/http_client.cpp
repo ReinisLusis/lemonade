@@ -1223,10 +1223,8 @@ DownloadResult HttpClient::download_file(const std::string& url,
     job_context.total_files = options.job_total_files;
     job_context.may_resume = options.resume_partial;
     // Hand it to the system downloader if this machine has one. Nothing here
-    // names what that is: a supervisor was discovered, so it gets the work, and
-    // whether it fetches the bytes itself or passes them further on is its
-    // business. On a machine with none, this returns false and the loop below
-    // runs exactly as it always did.
+    // names what that is: a supervisor was discovered, so it gets the work.
+    // With none, this returns false and the loop below runs as before.
     {
         std::string offload_error;
         if (download::offload(job_context, callback, offload_error)) {

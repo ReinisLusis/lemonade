@@ -101,11 +101,8 @@ private:
     void show_notification(const std::string& title, const std::string& message);
 
     // Tell somebody about downloads that finished while this was not running.
-    //
     // The server has already taken delivery of them by the time this runs, so
-    // they now look like any other finished download and there is nothing left
-    // in the UI to notice. Without this, a download that succeeded overnight is
-    // indistinguishable from one that was never started.
+    // nothing else in the UI has anything left to notice.
     void announce_delivered_downloads();
 
     // Connection helpers

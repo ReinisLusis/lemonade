@@ -651,12 +651,9 @@ namespace lemon::backends {
                 archive_download_opts.expected_hash = lookup_expected_asset_hash(
                     spec.recipe, backend, expected_version, repo, filename);
                 archive_download_opts.resume_partial = false;
-                // Without a group id the job is recorded but excluded from
-                // /downloads, so a backend interrupted partway came back
-                // invisible while its bytes sat on disk.
-                //
-                // The id has to be the one the live path already uses, or a
-                // resumed row would not match the download the UI thinks it is
+                // A job without a group id is excluded from /downloads, and
+                // the id has to match the one the live path uses or a resumed
+                // row would not match the download the UI thinks it is
                 // resuming. A backend alone is not unique -- "npu" belongs to
                 // both flm and ryzenai-llm -- so the recipe is part of it.
                 const std::string job_name = spec.recipe + ":" + backend;

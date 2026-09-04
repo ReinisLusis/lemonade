@@ -679,11 +679,9 @@ Server::Server(std::shared_ptr<RuntimeConfig> config,
     download::adopt_orphans();
 
     // And close out the ones that had already finished. A transfer that
-    // completed while this application was closed sits at TRANSFERRED -- proven
-    // bytes that nobody has said they have -- and is excluded from the orphan
-    // sweep on purpose, because adopting it would fetch a finished file again.
-    // Nothing else was going to move it, so it showed up as a row at 100%
-    // labelled paused with a resume button that could do nothing.
+    // completed while this application was closed sits at TRANSFERRED, and is
+    // excluded from the orphan sweep because adopting it would fetch a
+    // finished file again. Nothing else moves it out of that state.
     for (const auto& record : download::take_delivery()) {
         const std::string name = download::spec_string(record, "display_name");
         delivered_at_startup_.push_back({
@@ -7494,13 +7492,11 @@ std::shared_ptr<Server::DownloadJob> Server::start_download_job(
     const std::string& display_name,
     std::function<void(DownloadProgressCallback)> operation) {
 
-    // Starting is also RESUMING, and a resume has to withdraw the pause.
-    //
-    // The UI has no separate resume action: it re-issues the pull, and this
-    // function deduplicates by download id. So this is the only place that can
-    // say "run again". Without it a pause would be permanent -- the record would
-    // keep asking every owner to stop, and a supervisor honouring intent
-    // correctly would refuse to touch it forever.
+    // Starting is also resuming, and a resume has to withdraw the pause. The
+    // UI has no separate resume action -- it re-issues the pull, which this
+    // deduplicates by download id -- so this is the only place that can say
+    // "run again", and without it the record would go on asking every owner to
+    // stop forever.
     download::intend(download_id, abstraction::job::want::kRun, "lemonade-ui");
 
     std::shared_ptr<DownloadJob> old_job;
@@ -7638,11 +7634,9 @@ std::shared_ptr<Server::DownloadJob> Server::start_download_job(
             }
 
             std::lock_guard<std::mutex> lock(downloads_mutex_);
-            // A pause no longer sets cancel_requested -- that flag is what makes
-            // a worker write a terminal cancelled state to the shared record,
-            // which is the lie being fixed. So a deliberate stop now has two
-            // shapes, and reading only the flag reported a paused download as an
-            // error: the worker stopped on purpose and nothing here knew it.
+            // A deliberate stop has two shapes. Only a cancel sets
+            // cancel_requested, so reading that flag alone reports a paused
+            // download as an error.
             if (job->cancel_requested || job->cancel_action == "pause") {
                 job->status = job->cancel_action == "cancel" ? "cancelled" : "paused";
                 job->error.clear();
@@ -7774,11 +7768,7 @@ nlohmann::json Server::persisted_download_rows() const {
                 {"overall_bytes_downloaded", 0},
                 {"percent", 0},
                 {"complete", false},
-                // Filled in from the record's own state below. It used to be
-                // hardcoded "paused", which was right for one case and a lie for
-                // the others: a finished download appeared as a row stuck at
-                // 100% labelled paused, offering a resume button that could not
-                // do anything, because there was nothing left to fetch.
+                // Filled in from the record's own state below.
                 {"status", "paused"},
                 {"running", false}
             };
@@ -7809,10 +7799,8 @@ nlohmann::json Server::persisted_download_rows() const {
         }
     }
 
-    // Say what the records actually say. This used to be hardcoded "paused" for
-    // every row, so a download that had finished while the application was
-    // closed came back as a row stuck at 100% labelled paused, with a resume
-    // button that could not do anything because there was nothing left to fetch.
+    // Say what the records say. A row that reports "paused" regardless offers
+    // a resume button for a download with nothing left to fetch.
     for (auto& [group, row] : rows) {
         const bool done = unfinished.find(group) == unfinished.end();
         row["status"] = done ? "completed" : "paused";
@@ -7829,15 +7817,13 @@ nlohmann::json Server::persisted_download_rows() const {
     return out;
 }
 
-// What arrived while nobody was watching.
+// What arrived while nobody was watching. By the time any UI is up these
+// records have already been completed, so this is the only thing left that can
+// say it happened.
 //
-// The two-phase ending exists so that "the service finished this while your
-// application was closed" is expressible at all, and this is the half a person
-// sees: by the time any UI is up the records have already been completed, so
-// without this there is no way left to tell them it happened. Answering the
-// same list to every client, and never draining it, is deliberate -- a client
-// decides for itself whether it has already said something, and losing the
-// notice because another client asked first would be worse than repeating it.
+// Answered to every client and never drained: a client decides for itself
+// whether it has already said something, and losing the notice because another
+// client asked first would be worse than repeating it.
 void Server::handle_downloads_delivered(const httplib::Request&, httplib::Response& res) {
     res.set_content(delivered_at_startup_.dump(), "application/json");
 }
@@ -7925,21 +7911,11 @@ void Server::handle_download_control(const httplib::Request& req, httplib::Respo
                     job->status == "error";
 
                 if (!terminal) {
-                    // Say what is wanted, in the one place every participant can
-                    // see it, BEFORE touching anything local.
-                    //
-                    // This process is frequently not the one moving the bytes.
-                    // The transfer may be in BITS, or on a NAS, continuing while
-                    // this application is closed -- and stopping our own worker
-                    // says nothing to either of them. It showed: a pause here
-                    // marked the local job "paused", wrote a terminal cancel to
-                    // the shared record, and the NAS carried on and finished a
-                    // 3.1 GB model nobody would collect.
-                    //
-                    // Intent is the field for this and needs no lease, because
-                    // whoever wants a job stopped is almost never the process
-                    // doing it. The owner converges at its next checkpoint,
-                    // wherever it is running.
+                    // Say what is wanted where every participant can see it,
+                    // before touching anything local. This process is often
+                    // not the one moving the bytes -- the transfer may be on a
+                    // NAS, continuing while this application is closed -- so
+                    // stopping our own worker says nothing to it.
                     download::intend(id,
                                      action == "cancel" ? abstraction::job::want::kCancel
                                                         : abstraction::job::want::kPause,
@@ -7947,12 +7923,10 @@ void Server::handle_download_control(const httplib::Request& req, httplib::Respo
 
                     job->cancel_action = action;
                     job->status = action == "cancel" ? "cancelled" : "paused";
-                    // A cancel still stops our own worker directly. A PAUSE must
-                    // not: cancel_requested is what makes the worker write a
-                    // terminal cancelled state to the shared record, which is
-                    // exactly the lie being fixed -- a paused download is not a
-                    // finished one, and it has to remain resumable by whoever
-                    // picks it up next.
+                    // A cancel stops our own worker directly; a pause must
+                    // not. cancel_requested makes the worker write a terminal
+                    // state to the shared record, and a paused download has to
+                    // stay resumable by whoever picks it up next.
                     if (action == "cancel") {
                         job->cancel_requested = true;
                     }

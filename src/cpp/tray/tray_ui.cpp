@@ -112,8 +112,7 @@ bool TrayUI::initialize() {
             show_notification("Woohoo!", "Lemonade Server is running! Right-click the tray icon to access options.");
         }
         // Off the UI thread: this asks the server a question over HTTP, and a
-        // tray icon that stops responding while it waits is a worse bug than
-        // the missing notice it is here to fix.
+        // tray icon that stops responding while it waits is the worse bug.
         std::thread([this]() { announce_delivered_downloads(); }).detach();
     });
 
@@ -765,9 +764,7 @@ void TrayUI::announce_delivered_downloads() {
             return;
         }
         for (const auto& item : delivered) {
-            // One notice per download, not per file: a model is a dozen files
-            // and a dozen toasts for one download is not a notification, it is
-            // a punishment.
+            // One notice per download, not per file: a model is a dozen files.
             std::string name = item.value("model_name", std::string());
             if (name.empty()) {
                 name = item.value("group_id", std::string());

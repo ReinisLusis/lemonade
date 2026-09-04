@@ -1,29 +1,17 @@
 #pragma once
 
-// The download layer: the one place that knows what a `kind: "download"` job
-// means. The job layer underneath stores its spec and checkpoint without
-// understanding either, which is what lets this file grow mirrors, chunk
-// manifests or webseeds without changing the record Go, Python and C++ all
-// have to agree about.
-//
-// Nothing here replaces the transport. libcurl keeps moving the bytes exactly
-// as before; this gives the transfer an identity that outlives the process
-// doing it, so a download interrupted by a close, a crash or a reboot is
-// resumed rather than restarted.
-
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <abstraction/job/store.h>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <abstraction/job/store.h>
+
 namespace lemon {
 namespace download {
 
-// The job kind this layer understands. A reader that meets a kind it does not
-// know leaves that job alone rather than guessing at its spec.
 constexpr const char* kKind = "download";
 
 // What the transport knows about one transfer at the moment it starts.
@@ -43,20 +31,15 @@ struct Context {
     int file_index = -1;
     int total_files = 0;
 
-    // Whether a partial already on disk may be continued.
-    //
-    // This has to cross the boundary or the provider decides it, and then the
-    // same download resumes or restarts depending on whether a supervisor
-    // happens to be running. A caller that says "start clean" means it however
-    // the bytes are fetched -- backend archives say exactly that, and an
-    // abstraction whose semantics depend on who answers is not one.
+    // Whether a partial already on disk may be continued. Crosses the boundary
+    // rather than being decided by whoever fetches, or the same download would
+    // resume or restart depending on which provider answered.
     bool may_resume = true;
 };
 
-// Holds the lease for one transfer, and writes the checkpoint a successor would
+// Holds the lease for one transfer and writes the checkpoint a successor would
 // need. Every operation fails soft: a job store that cannot be opened or
-// written must never stop bytes from moving, because the downloader worked
-// before this layer existed and has to keep working when it is broken.
+// written must never stop bytes from moving.
 class Tracker {
 public:
     explicit Tracker(const Context& ctx);
@@ -68,18 +51,17 @@ public:
     bool active() const;
 
     // How many leading bytes of the partial file a predecessor proved. The
-    // transport resumes from the file's own size, which is never larger; this
-    // is what a successor in another process would be told.
+    // transport resumes from the file's own size, which is never larger.
     std::int64_t verified_prefix() const;
 
-    // Called from the progress callback. Checkpoints and renews the lease on
-    // bytes OR elapsed time, whichever comes first — a byte threshold alone
-    // saves nothing on a slow link, which is where the long transfers are.
+    // Checkpoints and renews the lease on bytes OR elapsed time, whichever
+    // comes first — a byte threshold alone renews nothing on a slow link,
+    // which is where the long transfers are.
     void observe(std::size_t downloaded, std::size_t total);
 
-    // Claims a job whose previous owner has let its lease lapse. A resume
-    // almost always begins while the killed owner's lease is still running, and
-    // giving up then means the bytes are fetched and nothing is recorded.
+    // Claims a job whose previous owner let its lease lapse. A resume usually
+    // begins while a killed owner's lease is still running, and giving up then
+    // means the bytes are fetched and nothing is recorded.
     void take_over_if_free();
 
     // The bytes are verified and in place, but nobody has taken delivery yet.
@@ -92,93 +74,57 @@ private:
     std::unique_ptr<State> state_;
 };
 
-// The store every download job lives in, rooted under the Lemonade cache
-// directory. Returns nullptr when it could not be opened.
+// Rooted under the Lemonade cache directory. Null when it could not be opened.
 abstraction::job::FileStore* store();
 
-// At start-up, reconcile every download job nobody holds with what is actually
-// on disk. This is the payoff: Lemonade closed mid-download, reopened, and the
-// transfer continues from the bytes already fetched instead of restarting.
-//
-// Reclaiming is the mechanism and handing off is only an optimisation — a
-// process that is killed, or a machine that loses power, never gets to hand
-// anything over.
+// Reconcile every unheld download job with what is on disk, so a transfer
+// interrupted by a close, a crash or a power cut continues from the bytes
+// already fetched. Reclaiming is the mechanism; handing off is an optimisation
+// a killed process never gets to perform.
 void adopt_orphans();
 
-// Close out transfers that finished while nobody was here to say so.
+// Close out transfers that finished while nobody was here to say so, and
+// return what was delivered.
 //
 // TRANSFERRED means the bytes arrived and were proven; COMPLETE means somebody
-// said "I have them". The two-phase ending is the only way to express "this
-// finished while your application was closed", and nothing was performing the
-// second half. Every other state survives its owner dying because the lease
-// lapses and a sweep adopts it -- but adopting a TRANSFERRED job would
-// re-download a finished file, so it is deliberately excluded from the sweep,
-// and the exclusion that prevents that loop is the same one that stranded the
-// record. A download manager showed the result: rows at 100% labelled paused,
-// offering a resume button with nothing left to fetch.
-//
-// Returns what it took delivery of, so a client can tell somebody. That list is
-// exactly the set of downloads that finished while they were not watching.
+// said "I have them". A TRANSFERRED job is excluded from the orphan sweep
+// because adopting one would re-download a finished file, so without this it
+// stays recorded forever at 100% with a resume button and nothing to fetch.
 std::vector<abstraction::job::Record> take_delivery();
 
-// Say what should happen to every unfinished transfer in a download.
+// Say what should happen to every unfinished transfer in a download, and
+// return how many records were asked.
 //
-// # Why this has to exist
-//
-// A pause clicked here used to stop this process and nothing else. The transfer
-// is often not in this process at all -- it is in BITS, or on a NAS, moving
-// bytes while every application that asked is closed -- and the only thing the
-// UI could do was mark its own copy of the job "paused" and write a terminal
-// CANCEL to the shared record. Measured consequence: the UI said paused at 38%,
-// the record said cancelled, and the NAS fetched the remaining 2 GB and finished.
-// Three participants sharing one store, three answers.
-//
-// Intent is the field that makes this expressible, and it is the ONE write that
-// needs no lease -- precisely because whoever wants a job stopped is almost
-// never the process doing it. Schema 4 added it for this exact case; nothing
-// here had ever called it.
-//
-// A Lemonade download is a GROUP of files, so this asks about all of them.
-// Returns how many records were asked.
-//
-// It does not stop anything by itself, and must not: the owner honours the
-// intent at its next checkpoint, which is what makes the request work across a
-// process, a machine, and a reboot.
+// The transfer is often not in this process — it may be on a NAS, moving bytes
+// while every application that asked is closed — so writing a terminal state
+// locally leaves the two disagreeing. Intent is the one field that needs no
+// lease, precisely because whoever wants a job stopped is rarely the process
+// doing it. This stops nothing by itself: the owner honours the intent at its
+// next checkpoint, which is what makes the request survive a process, a
+// machine and a reboot.
 int intend(const std::string& group_id, const std::string& want, const std::string& by);
 
-// Every download job that is not yet finished, for rebuilding the user-visible
-// download list after a restart.
 std::vector<abstraction::job::Record> unfinished_jobs();
 
-// The parts of a download spec the server needs to describe a row.
 std::string spec_string(const abstraction::job::Record& r, const char* key);
 std::int64_t spec_int(const abstraction::job::Record& r, const char* key);
 
 // Hand this transfer to the system downloader, if this machine has one.
 //
-// The point is not speed. libcurl here and a supervisor there move bytes at the
-// same rate; the difference is that the supervisor keeps moving them when
-// Lemonade is closed, asleep or crashed, and may itself pass the work further
-// on to something always-on. Which is exactly the substitution this whole layer
-// exists for: the caller asked for bytes and never chose a provider.
+// Not a speed optimisation: the difference is that the supervisor keeps moving
+// bytes when Lemonade is closed, asleep or crashed, and may pass the work
+// further on to something always-on.
 //
-// Returns false when there is no system downloader, and then the caller
-// downloads for itself exactly as before. That fallback is not an error path;
-// it is the ordinary case on a machine nobody has set one up on.
-//
-// It BLOCKS until the transfer finishes, so download_file's contract does not
-// change: when this returns true the file is where the caller asked for it.
-// What changed is who fetched it. Closing Lemonade mid-transfer no longer stops
-// the bytes -- the supervisor carries on, and the next start adopts the result
-// instead of beginning again.
+// BLOCKS, so download_file's contract does not change: when this returns true
+// the file is where the caller asked for it. Returns false when there is no
+// system downloader, and the caller then downloads for itself exactly as
+// before — the ordinary case, not an error path.
 bool offload(const Context& ctx,
              const std::function<bool(std::size_t, std::size_t)>& on_progress,
              std::string& error_out);
 
-// Whether a system downloader is available, for a status line. Cheap: two file
-// reads.
+// Cheap: two file reads.
 bool offload_available();
-
 
 }  // namespace download
 }  // namespace lemon

@@ -35,9 +35,8 @@ namespace {
 using abstraction::job::Json;
 using abstraction::job::Record;
 
-// The lease outlives a stall but not a crash by much: long enough that a slow
-// link does not lose ownership between checkpoints, short enough that a killed
-// process's work is adoptable while the user is still watching.
+// Long enough that a slow link does not lose ownership between checkpoints,
+// short enough that a killed process's work is adoptable soon after.
 constexpr auto kLeaseTtl = std::chrono::seconds(60);
 constexpr auto kCheckpointInterval = std::chrono::seconds(5);
 constexpr std::int64_t kCheckpointBytes = 8 * 1024 * 1024;
@@ -84,15 +83,9 @@ const Json* spec_at(const Record& r, const char* dotted) {
 
 }  // namespace
 
-// The record says a digest is "sha256:<hex>". Writing it bare is a contract
-// violation that nothing here catches: the job layer will not parse a spec —
-// that opacity is exactly what lets download evolve without a schema change in
-// three languages — so a bare digest travels intact to a reader that builds
-// "sha256:" + hex and compares strings.
-//
-// It cost a real 1.5 GB download. The error read "got sha256:1fc70f… want
-// 1fc70f…", the same digest twice, and the mismatch path deletes the partial,
-// so correct bytes were thrown away and fetched a second time.
+// A spec is opaque to the job layer, so nothing downstream normalises this. A
+// bare digest reaches a reader that compares it against "sha256:" + hex, and
+// the mismatch path deletes a partial that was correct.
 std::string qualified_digest(const std::string& d) {
     if (d.empty() || d.find(':') != std::string::npos) {
         return d;
@@ -118,20 +111,10 @@ abstraction::job::FileStore* store() {
     std::lock_guard<std::mutex> lock(mutex);
     if (!tried) {
         tried = true;
-        // The machine's store if this machine has one, and only then a private
-        // one under the cache.
-        //
-        // A private store was the original mistake. It made a download two
-        // records -- ours and the supervisor's -- for one piece of work, so
-        // handing a transfer over meant COPYING a job between stores and
-        // carrying its checkpoint across by hand. Two records for one thing is
-        // a reconciliation problem nobody asked for, and it showed: moving the
-        // cache directory moved the store with it, and every in-flight download
-        // became invisible while its bytes sat on disk.
-        //
-        // With one store there is nothing to copy. Handing over stops being a
-        // transfer of ownership and becomes what it always should have been:
-        // not picking the job up yourself.
+        // The machine's store if this machine has one, and only then a
+        // private one under the cache. A store per application would make a
+        // handed-over transfer two records for one piece of work, with a
+        // checkpoint to carry between them.
         std::string root = abstraction::job::machine_store();
         if (root.empty()) {
             root = utils::path_to_utf8(utils::path_from_utf8(utils::get_cache_dir()) / "jobs");
@@ -230,22 +213,11 @@ Tracker::Tracker(const Context& ctx) {
             }
         }
     } catch (const abstraction::job::LeaseHeld& e) {
-        // Somebody holds the lease. Let the transfer carry on — refusing here
-        // would be a behaviour change — but KEEP TRYING, because the holder is
-        // very often gone.
-        //
-        // Resuming an interrupted download is the ordinary case: a process was
-        // killed, its lease has seconds left to run, and the obvious next thing
-        // a person does is start the download again. Giving up here meant the
-        // bytes were fetched and NOTHING was recorded — a real 397 MB file
-        // arrived complete while the store still called it a 95% orphan owned by
-        // a dead pid, which is exactly the state a supervisor would try to
-        // "fix" by downloading it again.
-        //
-        // So retry from observe(). Within one lease TTL the dead owner's claim
-        // lapses and this one succeeds; if the holder is genuinely alive it
-        // keeps its job and this stays a passive observer, which is what the
-        // original comment was right about.
+        // Let the transfer carry on, but keep asking from observe(): starting
+        // a download again moments after the last attempt was killed is the
+        // ordinary case, and that holder's lease still has seconds to run.
+        // Staying a passive observer would fetch the bytes while the store
+        // went on calling the file an orphan for a supervisor to re-download.
         LOG(INFO, "DownloadJob") << "another owner holds this download, will keep trying: "
                                  << e.what() << std::endl;
         state_ = std::unique_ptr<State>(new State());
@@ -277,11 +249,9 @@ bool Tracker::active() const { return state_ && state_->holding; }
 
 std::int64_t Tracker::verified_prefix() const { return state_ ? state_->verified_prefix : 0; }
 
-// take_over_if_free claims a job whose previous owner has let its lease lapse.
-//
-// Rate limited, because the alternative is a store read on every progress
-// callback. When it succeeds the dead owner's checkpoint is adopted, so what
-// this process records continues that history rather than starting a new one.
+// Rate limited: the alternative is a store read on every progress callback.
+// The previous owner's checkpoint is adopted, so what this process records
+// continues that history rather than starting a new one.
 void Tracker::take_over_if_free() {
     const auto now = std::chrono::steady_clock::now();
     if (now < state_->next_claim_attempt) {
@@ -520,14 +490,10 @@ std::vector<Record> take_delivery() {
             // should see, because something still has to happen.
             continue;
         }
-        // Otherwise: delivered, and since moved or consumed by whoever wanted
-        // it. TRANSFERRED is only ever set after the bytes reach their final
-        // path, so a missing file does not mean the delivery failed -- it means
-        // it succeeded and something then used the result. A backend zip is
-        // downloaded, extracted and deleted, which is correct behaviour that no
-        // file-existence test could ever satisfy. Requiring the file to still be
-        // there confuses "did this arrive" with "is it still where it landed",
-        // and only the first is this layer's business.
+        // Otherwise: delivered, and since moved or consumed. TRANSFERRED is
+        // set only after the bytes reach their final path, so a missing file
+        // means the delivery succeeded and something used the result -- a
+        // backend zip is downloaded, extracted and deleted.
 
         try {
             const Record claimed = jobs->claim(r.id, owner_name(), kLeaseTtl);
@@ -606,19 +572,12 @@ std::vector<Record> unfinished_jobs() {
             if (r.kind != kKind || spec_string(r, "group_id").empty()) {
                 continue;
             }
-            // Recently COMPLETE jobs belong here too, and leaving them out was
-            // the wrong half of a fix.
-            //
-            // These are downloads that finished while this application was not
-            // running — the whole point of putting them in a durable store. If
-            // the list only ever shows unfinished work, then closing the app
-            // during a download and coming back to an empty download manager is
-            // indistinguishable from the download never having happened. The
-            // user is entitled to see that it finished.
-            //
-            // Bounded by age so the list does not become a permanent history:
-            // the question this answers is "what happened while I was away",
-            // not "what have I ever downloaded".
+            // Recent COMPLETE jobs belong here: they are the downloads that
+            // finished while the application was closed, and without them
+            // coming back to an empty list is indistinguishable from the
+            // download never having happened. Bounded by age, because the
+            // question is what happened while away, not what was ever
+            // downloaded.
             if (r.terminal()) {
                 if (r.state != abstraction::job::state::kComplete) {
                     continue;  // failed and cancelled are not news
@@ -717,10 +676,9 @@ bool offload(const Context& ctx,
         return false;
     }
 
-    // And now the whole of "handing it over": do not claim it. The lease is what
-    // says who is working, so declining to take one leaves the job claimable and
-    // the supervisor adopts it on its next sweep. The nudge only makes that
-    // sooner.
+    // The whole of handing it over: do not claim it. The lease says who is
+    // working, so declining one leaves the job claimable and the supervisor
+    // adopts it on its next sweep. The nudge only makes that sooner.
     LOG(INFO, "Download") << "left for the system downloader (" << sup.owner << "), job " << id
                           << std::endl;
     abstraction::job::nudge(root);
@@ -756,15 +714,11 @@ bool offload(const Context& ctx,
             }
         }
 
-        // Somebody asked this to stop. The rule is the job layer's, not this
-        // file's invention: an owner must check intent at least as often as it
-        // checkpoints and move toward it.
-        //
-        // Waiting is what this process is doing, so honouring a pause means
-        // giving up the wait -- NOT cancelling the job. The delegate stops on
-        // its own side because it reads the same record, and the transfer stays
-        // resumable by whoever comes back for it. Writing a terminal state here
-        // is what turned a pause into a lost 3.1 GB download.
+        // An owner must check intent at least as often as it checkpoints and
+        // move toward it. Waiting is all this process is doing, so honouring a
+        // pause means giving up the wait and NOT cancelling: the delegate
+        // stops on its own side from the same record, and a terminal state
+        // written here would discard bytes that are still resumable.
         if (now.wants() == abstraction::job::want::kPause) {
             error_out = "paused";
             return true;
