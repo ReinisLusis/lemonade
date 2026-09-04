@@ -362,10 +362,14 @@ endif()
 #
 # Declared after json so it reuses whichever nlohmann_json target this build
 # already has, system or fetched, instead of pulling a second copy.
+#
+# While the abstraction repository is private this URL only resolves for
+# somebody with credentials for it. Point FETCHCONTENT_SOURCE_DIR_ABSTRACTION at
+# a local checkout to build without reaching GitHub at all.
 include(FetchContent)
 FetchContent_Declare(abstraction
     GIT_REPOSITORY https://github.com/ReinisLusis/abstraction.git
-    GIT_TAG        main  # TODO: pin to a sha
+    GIT_TAG        2663af339e90f9c3934791cad75d933214fad20d
     GIT_SHALLOW    TRUE
     EXCLUDE_FROM_ALL
 )
