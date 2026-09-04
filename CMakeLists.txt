@@ -340,26 +340,6 @@ endif()
 
 # === nlohmann/json ===
 if(NOT USE_SYSTEM_JSON)
-    # The job and storage abstractions, shared with the Go and Python
-    # implementations of the same contract. These used to be twelve vendored
-    # files under src/cpp/job and src/cpp/storage, in this project's own
-    # namespace -- a facade named after one of its consumers, which meant any
-    # other adopter would have had to vendor a fork of Lemonade to get an
-    # interface that has nothing to do with Lemonade.
-    #
-    # Pinned to a sha rather than a branch, like every other dependency here.
-    # The record format is a cross-language contract; an adopter tracking a
-    # branch could find the way its downloads are recorded changed by somebody
-    # else's commit.
-    FetchContent_Declare(abstraction
-        GIT_REPOSITORY https://github.com/ReinisLusis/ai-abstractions.git
-        GIT_TAG        main  # TODO: pin to a sha once the repo is published
-        GIT_SHALLOW    TRUE
-        EXCLUDE_FROM_ALL
-    )
-    set(ABSTRACTION_BUILD_TESTS OFF CACHE INTERNAL "")
-    set(ABSTRACTION_BUILD_TOOLS OFF CACHE INTERNAL "")
-
     FetchContent_Declare(json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
         GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03  # v3.11.3
@@ -368,8 +348,30 @@ if(NOT USE_SYSTEM_JSON)
     set(JSON_BuildTests OFF CACHE INTERNAL "")
     set(JSON_Install OFF CACHE INTERNAL "")
     FetchContent_MakeAvailable(json)
-    FetchContent_MakeAvailable(abstraction)
 endif()
+
+# === abstraction ===
+#
+# The job and storage layers, shared with the Go and Python implementations of
+# the same contract.
+#
+# Pinned to a sha rather than a branch, like every other dependency here. The
+# record format is a cross-language contract, so an adopter tracking a branch
+# could find the way its downloads are recorded changed by somebody else's
+# commit.
+#
+# Declared after json so it reuses whichever nlohmann_json target this build
+# already has, system or fetched, instead of pulling a second copy.
+include(FetchContent)
+FetchContent_Declare(abstraction
+    GIT_REPOSITORY https://github.com/ReinisLusis/abstraction.git
+    GIT_TAG        main  # TODO: pin to a sha
+    GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+)
+set(ABSTRACTION_BUILD_TESTS OFF CACHE INTERNAL "")
+set(ABSTRACTION_BUILD_TOOLS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(abstraction)
 
 # === CLI11 ===
 if(NOT USE_SYSTEM_CLI11)
