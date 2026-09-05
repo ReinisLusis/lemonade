@@ -350,7 +350,7 @@ if(NOT USE_SYSTEM_JSON)
     FetchContent_MakeAvailable(json)
 endif()
 
-# === abstraction ===
+# === abstraction-job / abstraction-storage ===
 #
 # The job and storage layers, shared with the Go and Python implementations of
 # the same contract.
@@ -360,22 +360,27 @@ endif()
 # could find the way its downloads are recorded changed by somebody else's
 # commit.
 #
-# Declared after json so it reuses whichever nlohmann_json target this build
+# Declared after json so they reuse whichever nlohmann_json target this build
 # already has, system or fetched, instead of pulling a second copy.
-#
-# While the abstraction repository is private this URL only resolves for
-# somebody with credentials for it. Point FETCHCONTENT_SOURCE_DIR_ABSTRACTION at
-# a local checkout to build without reaching GitHub at all.
 include(FetchContent)
-FetchContent_Declare(abstraction
-    GIT_REPOSITORY https://github.com/ReinisLusis/abstraction.git
-    GIT_TAG        2663af339e90f9c3934791cad75d933214fad20d
+FetchContent_Declare(abstraction_job
+    GIT_REPOSITORY https://github.com/openabstractions/abstraction-job.git
+    GIT_TAG        35235f3e0d0c1a007554a1bd41ea2e6fdde33ba0
     GIT_SHALLOW    TRUE
     EXCLUDE_FROM_ALL
 )
-set(ABSTRACTION_BUILD_TESTS OFF CACHE INTERNAL "")
-set(ABSTRACTION_BUILD_TOOLS OFF CACHE INTERNAL "")
-FetchContent_MakeAvailable(abstraction)
+set(ABSTRACTION_JOB_BUILD_TESTS OFF CACHE INTERNAL "")
+set(ABSTRACTION_JOB_BUILD_TOOLS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(abstraction_job)
+
+FetchContent_Declare(abstraction_storage
+    GIT_REPOSITORY https://github.com/openabstractions/abstraction-storage.git
+    GIT_TAG        0d008d2a8ce713837889d5066669f7ea81caebe7
+    GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+)
+set(ABSTRACTION_STORAGE_BUILD_TESTS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(abstraction_storage)
 
 # === CLI11 ===
 if(NOT USE_SYSTEM_CLI11)
